@@ -1,12 +1,19 @@
-// StickS3 硬件摸底固件：只读取、不写外设寄存器（屏幕与串口除外）。
-// 目的：把交接文档里"来源为文档检索、未上板核实"的硬件事实换成实测值。
+// StickS3 硬件摸底固件
+//   - 周期输出板型 / flash / PSRAM / I2C 地址表 / 电量 / IMU
+//   - 按 A 键执行音频自检：喇叭 440 Hz 提示音 → 录 3 s → 回放 → 打印峰值/RMS
+// 音频注意：M5Unified 的 Mic/Speaker 各占一个 I2S 控制器且共用时钟脚，只能交替使用。
 #include <M5Unified.h>
+#include <esp_heap_caps.h>
 #include <esp_system.h>
+#include <math.h>
 
 namespace {
 
 constexpr int kLineH = 10;
 constexpr int kMaxI2C = 10;
+constexpr uint32_t kAudioRate = 16000;
+constexpr size_t kRecSeconds = 3;
+constexpr size_t kRecLen = kAudioRate * kRecSeconds;
 
 struct Probe {
   int board;
@@ -22,6 +29,21 @@ struct Probe {
   bool imuOk;
   float ax, ay, az;
 };
+
+int16_t* alloc_psram(size_t samples) {
+  return static_cast<int16_t*>(
+      heap_caps_malloc(samples * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+}
+
+void status(const char* line) {
+  auto& d = M5.Display;
+  d.fillRect(0, 186, d.width(), 24, TFT_BLACK);
+  d.setTextSize(1);
+  d.setTextColor(TFT_YELLOW, TFT_BLACK);
+  d.setCursor(2, 190);
+  d.print(line);
+  Serial.printf("[audio] %s\n", line);
+}
 
 Probe sample() {
   Probe p{};
@@ -85,13 +107,11 @@ void draw(const Probe& p) {
   d.setCursor(2, y);
   d.printf("i2c %d dev", p.i2cCount);
   y += kLineH;
+  d.setCursor(2, y);
   for (int i = 0; i < p.i2cCount; ++i) {
-    d.setCursor(2 + (i % 4) * 33, y);
-    d.printf("%02X", p.i2cAddr[i]);
-    if (i % 4 == 3) y += kLineH;
+    d.printf("%02X ", p.i2cAddr[i]);
   }
-  if (p.i2cCount > 0) y += kLineH;
-
+  y += kLineH;
   d.setCursor(2, y);
   d.printf("%ldmV %ld%%", static_cast<long>(p.battMv), static_cast<long>(p.battPct));
   y += kLineH;
@@ -106,12 +126,75 @@ void draw(const Probe& p) {
     d.print("imu missing");
   }
 
-  // 三原色块：用于确认 RGB 顺序与反色设置是否正确
+  // 三原色块：确认 RGB 顺序与反色设置
   d.fillRect(2, 150, 42, 16, TFT_RED);
   d.fillRect(46, 150, 42, 16, TFT_GREEN);
   d.fillRect(90, 150, 42, 16, TFT_BLUE);
-  d.setCursor(2, 172);
-  d.print("press A to rescan");
+}
+
+void run_audio_test() {
+  status("audio: tone...");
+  int16_t* tone = alloc_psram(kAudioRate / 2);
+  int16_t* rec = alloc_psram(kRecLen);
+  if (!tone || !rec) {
+    status("psram alloc failed");
+    return;
+  }
+
+  // 1) 喇叭：440 Hz、0.5 s，验证 codec DAC + PM1 上的功放使能
+  for (size_t i = 0; i < kAudioRate / 2; ++i) {
+    tone[i] = static_cast<int16_t>(sinf(2.0f * M_PI * 440.0f * i / kAudioRate) * 6000);
+  }
+  M5.Speaker.begin();
+  M5.Speaker.setVolume(96);
+  M5.Speaker.playRaw(tone, kAudioRate / 2, kAudioRate, false);
+  uint32_t t0 = millis();
+  while (M5.Speaker.isPlaying() && millis() - t0 < 3000) delay(10);
+  M5.Speaker.end();
+
+  // 2) 录音 3 s（ES8311 上电后约 1 s 内样本可能全 0，先丢掉）
+  status("audio: mic 3s...");
+  bool began = M5.Mic.begin();
+  if (!began) {
+    status("mic begin failed");
+    free(tone);
+    free(rec);
+    return;
+  }
+  delay(1200);
+  bool queued = M5.Mic.record(rec, kRecLen, kAudioRate);
+  t0 = millis();
+  while (queued && M5.Mic.isRecording() && millis() - t0 < 6000) delay(10);
+  M5.Mic.end();
+
+  int32_t peak = 0;
+  double sum_sq = 0.0;
+  size_t zeros = 0;
+  for (size_t i = 0; i < kRecLen; ++i) {
+    const int32_t v = rec[i];
+    const int32_t a = v < 0 ? -v : v;
+    if (a > peak) peak = a;
+    if (v == 0) ++zeros;
+    sum_sq += static_cast<double>(v) * v;
+  }
+  const double rms = sqrt(sum_sq / kRecLen);
+  Serial.printf("[audio] queued=%d peak=%ld rms=%.1f zeros=%u/%u\n", queued, static_cast<long>(peak),
+                rms, static_cast<unsigned>(zeros), static_cast<unsigned>(kRecLen));
+
+  // 3) 回放录音
+  status("audio: playback");
+  M5.Speaker.begin();
+  M5.Speaker.setVolume(96);
+  M5.Speaker.playRaw(rec, kRecLen, kAudioRate, false);
+  t0 = millis();
+  while (M5.Speaker.isPlaying() && millis() - t0 < 6000) delay(10);
+  M5.Speaker.end();
+
+  char line[32];
+  snprintf(line, sizeof(line), "peak%ld rms%.0f", static_cast<long>(peak), rms);
+  status(line);
+  free(tone);
+  free(rec);
 }
 
 }  // namespace
@@ -129,17 +212,23 @@ void setup() {
   Probe p = sample();
   report(p);
   draw(p);
+  status("A: audio test");
 }
 
 void loop() {
   M5.update();
   static uint32_t lastReport = 0;
-  const bool pressed = M5.BtnA.wasClicked() || M5.BtnB.wasClicked();
-  if (pressed || millis() - lastReport > 5000) {
-    lastReport = millis();
+
+  if (M5.BtnA.wasClicked()) {
+    Serial.println("[audio] button A -> audio test");
+    run_audio_test();
     Probe p = sample();
-    report(p);              // 串口每 5 s 一次，避免错过上电瞬间的日志
-    if (pressed) draw(p);   // 屏幕只在按键时重绘，免得闪
+    report(p);
+    draw(p);
+    status("A: audio test");
+  } else if (millis() - lastReport > 5000) {
+    lastReport = millis();
+    report(sample());
   }
   delay(50);
 }
