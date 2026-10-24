@@ -27,10 +27,23 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-[ -e "$PORT" ] || { echo "找不到串口 $PORT，先插上板子" >&2; exit 1; }
+[ -c "$PORT" ] || { echo "找不到串口 $PORT，先插上板子" >&2; exit 1; }
 
+# 只认"完整且可校验"的备份：大小必须等于整片容量，且有通过的 sha256 校验
 latest_backup() {
-  ls -1t "$ROOT"/backups/*.bin 2>/dev/null | head -1 || true
+  local f size
+  f="$(ls -1t "$ROOT"/backups/*.bin 2>/dev/null | head -1 || true)"
+  [ -n "$f" ] || return 0
+  size="$(stat -c %s "$f" 2>/dev/null || echo 0)"
+  if [ "$size" -ne "$((FLASH_SIZE))" ]; then
+    echo "== 忽略不完整备份（${size} 字节，应为 $((FLASH_SIZE))）: $f" >&2
+    return 0
+  fi
+  if [ -f "$f.sha256" ] && ! (cd "$(dirname "$f")" && sha256sum -c "$(basename "$f").sha256" >/dev/null 2>&1); then
+    echo "== 忽略校验失败的备份: $f" >&2
+    return 0
+  fi
+  printf '%s\n' "$f"
 }
 
 BACKUP="$(latest_backup)"
@@ -40,10 +53,18 @@ else
   mkdir -p "$ROOT/backups"
   BACKUP="$ROOT/backups/sticks3-uiflow2-$(date +%Y%m%d-%H%M%S).bin"
   echo "== 备份全片 $FLASH_SIZE 字节 → $BACKUP"
-  "$PY" "$ESPTOOL" --chip esp32s3 --port "$PORT" --baud 921600 \
-    --before default_reset --after no_reset \
-    read_flash 0x0 "$FLASH_SIZE" "$BACKUP"
-  sha256sum "$BACKUP" | tee "$BACKUP.sha256"
+  # 先写 .part，成功后再改名：中途中断不会留下一个"看起来像备份"的残片
+  if ! "$PY" "$ESPTOOL" --chip esp32s3 --port "$PORT" --baud 921600 \
+      --before default_reset --after no_reset \
+      read_flash 0x0 "$FLASH_SIZE" "$BACKUP.part"; then
+    rm -f "$BACKUP.part"
+    echo "备份失败，未生成有效备份" >&2
+    exit 1
+  fi
+  mv "$BACKUP.part" "$BACKUP"
+  # 记录相对路径，便于整棵目录搬移后仍能校验
+  (cd "$(dirname "$BACKUP")" && sha256sum "$(basename "$BACKUP")" > "$(basename "$BACKUP").sha256")
+  cat "$BACKUP.sha256"
 fi
 
 if [ "$BACKUP_ONLY" = "1" ]; then

@@ -13,7 +13,7 @@ constexpr int kCell = 18;
 constexpr int kGridX = 4;
 constexpr int kGridY = 20;
 constexpr int kGridW = kCols * kCell;  // 126
-constexpr int kGridH = kRows * kCell;  // 196
+constexpr int kGridH = kRows * kCell;  // 198
 constexpr int kMaxBody = kCols * kRows;
 constexpr int kMaxGhost = 512;
 
@@ -64,6 +64,7 @@ constexpr uint32_t kStarveTicks = 40;  // 连续这么多步没吃到东西就�
 int8_t g_aiPathX[kCols * kRows], g_aiPathY[kCols * kRows];
 int g_aiPathLen = 0;
 uint32_t g_sinceEat = 0;  // 距上次吃到苹果经过的步数
+bool g_paused = false;
 uint8_t g_dangerMask = 0;  // bit0..3 = 上/下/左/右  // AI 托管时跑快一点，观感更好
 
 int cx(int gx) { return gx * kCell + kCell / 2; }
@@ -105,6 +106,7 @@ void draw_grid() {
 }
 
 void draw_apple() {
+  if (g_foodX < 0) return;
   const int x = cx(g_foodX);
   const int y = cy(g_foodY);
   g_canvas.fillCircle(x, y + 1, 7, kApple);
@@ -148,23 +150,44 @@ void present() {
 }
 
 void spawn_food() {
-  for (int attempt = 0; attempt < 200; ++attempt) {
-    // 留出最外圈：贴着墙生成的苹果，吃完下一步就撞墙，体验上像"吃苹果就死"
-    const int8_t fx = 1 + esp_random() % (kCols - 2);
-    const int8_t fy = 1 + esp_random() % (kRows - 2);
-    bool occupied = false;
-    for (int i = 0; i < g_len; ++i) {
-      if (g_bx[i] == fx && g_by[i] == fy) {
-        occupied = true;
-        break;
+  // 枚举空格并分区：内部区优先（贴墙生成的苹果，吃完下一步必撞墙）
+  int16_t inner[kCols * kRows];
+  int16_t outer[kCols * kRows];
+  int innerCount = 0;
+  int outerCount = 0;
+  for (int y = 0; y < kRows; ++y) {
+    for (int x = 0; x < kCols; ++x) {
+      bool occupied = false;
+      for (int i = 0; i < g_len; ++i) {
+        if (g_bx[i] == x && g_by[i] == y) {
+          occupied = true;
+          break;
+        }
+      }
+      if (occupied) continue;
+      const int16_t idx = static_cast<int16_t>(y * kCols + x);
+      if (x >= 1 && x <= kCols - 2 && y >= 1 && y <= kRows - 2) {
+        inner[innerCount++] = idx;
+      } else {
+        outer[outerCount++] = idx;
       }
     }
-    if (!occupied) {
-      g_foodX = fx;
-      g_foodY = fy;
-      return;
-    }
   }
+  if (innerCount > 0) {
+    const int16_t idx = inner[esp_random() % innerCount];
+    g_foodX = idx % kCols;
+    g_foodY = idx / kCols;
+    return;
+  }
+  if (outerCount > 0) {
+    const int16_t idx = outer[esp_random() % outerCount];
+    g_foodX = idx % kCols;
+    g_foodY = idx / kCols;
+    return;
+  }
+  // 全盘占满：没有空格可放苹果，用 -1 表示"无食物"
+  g_foodX = -1;
+  g_foodY = -1;
 }
 
 void calibrate_neutral() {
@@ -208,8 +231,38 @@ void start_game(Mode m) {
   spawn_food();
   g_lastTick = millis();
   g_sinceEat = 0;
+  g_paused = false;
+  g_aiPathLen = 0;
+  g_dangerMask = 0;
   draw_header();
   present();
+}
+
+void draw_hint() {
+  auto& d = M5.Display;
+  d.fillRect(0, kGridY + kGridH + 1, 135, 240 - (kGridY + kGridH + 1), kBg);
+  d.setTextSize(1);
+  d.setTextColor(kText, kBg);
+  d.setCursor(4, kGridY + kGridH + 5);
+  d.print("A:AI  B:pause  holdB:manual");
+}
+
+void draw_pause(bool clear_only) {
+  auto& d = M5.Display;
+  const int bx = 25, by = 98, bw = 85, bh = 40;
+  if (clear_only) {
+    d.fillRoundRect(bx, by, bw, bh, 8, kBg);
+    d.drawRoundRect(bx, by, bw, bh, 8, kBg);
+    draw_header();
+    present();
+    return;
+  }
+  d.fillRoundRect(bx, by, bw, bh, 8, kBg);
+  d.drawRoundRect(bx, by, bw, bh, 8, kText);
+  d.setTextSize(2);
+  d.setTextColor(kText, kBg);
+  d.setCursor(bx + (bw - 6 * 12) / 2, by + 12);
+  d.print("PAUSE");
 }
 
 void finish_game(const char* why) {
@@ -432,21 +485,11 @@ Dir ai_dir() {
   static const Dir dirs[4] = {kUp, kDown, kLeft, kRight};
   SimState base;
   snapshot(&base);
-  g_aiPathLen = 0;
-  g_dangerMask = 0;
-
-  // 标记"走进去会死"的方向，供屏幕显示
-  for (int d = 0; d < 4; ++d) {
-    SimState after;
-    if (!sim_move(base, dirs[d], &after) || !has_exit(after)) {
-      g_dangerMask |= (1 << d);
-    }
-  }
 
   // 1) 能吃苹果且吃完还有退路；饿太久就放弃安全校验，赌一次
   const bool starving = g_sinceEat > kStarveTicks;
   Dir d = kRight;
-  if (bfs_to(base, g_foodX, g_foodY, &d, true)) {
+  if (g_foodX >= 0 && bfs_to(base, g_foodX, g_foodY, &d, false)) {
     SimState after;
     if (sim_move(base, d, &after) && (has_exit(after) || starving)) {
       if (starving && !has_exit(after)) {
@@ -454,7 +497,6 @@ Dir ai_dir() {
       }
       return d;
     }
-    g_aiPathLen = 0;  // 这条路不安全，不显示
   }
 
   // 2) 追自己的尾巴，先把身体解开
@@ -476,6 +518,25 @@ Dir ai_dir() {
     }
   }
   return best;
+}
+
+// 只在移动完成后调用：路径与危险格都基于当前头位置计算，避免与绘制错位
+void refresh_ai_overlay() {
+  static const Dir dirs[4] = {kUp, kDown, kLeft, kRight};
+  SimState base;
+  snapshot(&base);
+  g_aiPathLen = 0;
+  g_dangerMask = 0;
+  if (g_foodX < 0) return;
+
+  for (int d = 0; d < 4; ++d) {
+    SimState after;
+    if (!sim_move(base, dirs[d], &after) || !has_exit(after)) {
+      g_dangerMask |= (1 << d);
+    }
+  }
+  Dir d;
+  bfs_to(base, g_foodX, g_foodY, &d, true);
 }
 
 void tick() {
@@ -541,6 +602,7 @@ void tick() {
     ++g_curLen;
   }
 
+  if (g_mode == kAuto) refresh_ai_overlay();
   present();
   draw_header();
 }
@@ -557,13 +619,20 @@ void setup() {
 
   g_canvas.setColorDepth(16);
   if (!g_canvas.createSprite(kGridW, kGridH)) {
-    Serial.println("[snake] sprite alloc failed");
+    Serial.println("[snake] sprite alloc failed - halted");
+    M5.Display.fillScreen(TFT_RED);
+    M5.Display.setTextSize(2);
+    M5.Display.setTextColor(TFT_WHITE, TFT_RED);
+    M5.Display.setCursor(6, 108);
+    M5.Display.print("SPRITE FAIL");
+    while (true) delay(1000);  // 内存不足时宁可停机，也不要向空 sprite 绘制
   }
 
   calibrate_neutral();
 
   M5.Display.fillScreen(kBg);
   draw_header();
+  draw_hint();
   draw_grid();
   g_canvas.pushSprite(kGridX, kGridY);
   Serial.println("\n[snake] ready: tilt to steer, A=start");
@@ -573,24 +642,37 @@ void loop() {
   M5.update();
 
   if (M5.BtnA.wasClicked()) {
-    // A = AI 托管：活着就切模式，死了就直接开一局托管
+    // A = 切换 AI 托管 / 手动；死了则直接开一局托管
     if (g_alive) {
       g_mode = kAuto;
-      draw_header();
+      if (g_paused) {
+        g_paused = false;
+        draw_pause(true);  // 顺带擦掉 PAUSE 遮罩
+      } else {
+        draw_header();
+        present();
+      }
     } else {
       start_game(kAuto);
     }
     return;
   }
 
-  if (M5.BtnB.wasClicked()) {
-    // B = 人手：活着就交还控制，死了就重标姿态再开一局
+  if (M5.BtnB.wasClicked() || M5.BtnB.wasHold()) {
+    // B 短按 = 暂停/继续，长按 = 收回手动；死了则重标姿态开一局手动
     if (g_alive) {
-      g_mode = kManual;
-      g_aiPathLen = 0;
-      g_dangerMask = 0;
-      draw_header();
-      present();
+      if (M5.BtnB.wasHold()) {
+        // 长按：收回手动控制
+        g_paused = false;
+        g_mode = kManual;
+        g_aiPathLen = 0;
+        g_dangerMask = 0;
+        draw_header();
+        present();
+      } else {
+        g_paused = !g_paused;
+        draw_pause(!g_paused);
+      }
     } else {
       calibrate_neutral();
       start_game(kManual);
@@ -599,7 +681,7 @@ void loop() {
   }
 
   const uint32_t interval = (g_mode == kAuto) ? kAutoTickMs : g_tickMs;
-  if (g_alive && millis() - g_lastTick >= interval) {
+  if (g_alive && !g_paused && millis() - g_lastTick >= interval) {
     g_lastTick = millis();
     tick();
   }
