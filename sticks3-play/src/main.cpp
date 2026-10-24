@@ -60,8 +60,10 @@ float g_refX = 0, g_refY = 0;
 enum Mode { kManual, kAuto };
 Mode g_mode = kManual;
 constexpr uint32_t kAutoTickMs = 150;
+constexpr uint32_t kStarveTicks = 40;  // 连续这么多步没吃到东西就冒险去吃
 int8_t g_aiPathX[kCols * kRows], g_aiPathY[kCols * kRows];
 int g_aiPathLen = 0;
+uint32_t g_sinceEat = 0;  // 距上次吃到苹果经过的步数
 uint8_t g_dangerMask = 0;  // bit0..3 = 上/下/左/右  // AI 托管时跑快一点，观感更好
 
 int cx(int gx) { return gx * kCell + kCell / 2; }
@@ -205,6 +207,7 @@ void start_game(Mode m) {
   g_curLen = 0;
   spawn_food();
   g_lastTick = millis();
+  g_sinceEat = 0;
   draw_header();
   present();
 }
@@ -220,12 +223,21 @@ void finish_game(const char* why) {
     g_ghostY[i] = g_curY[i];
   }
   auto& d = M5.Display;
-  d.fillRoundRect(30, 104, 75, 30, 8, kBg);
-  d.drawRoundRect(30, 104, 75, 30, 8, kText);
-  d.setTextSize(2);
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(g_score));
+  const int bx = 25, by = 98, bw = 85, bh = 44;
+  d.fillRoundRect(bx, by, bw, bh, 8, kBg);
+  d.drawRoundRect(bx, by, bw, bh, 8, kText);
+
+  d.setTextSize(1);
   d.setTextColor(kText, kBg);
-  d.setCursor(38, 112);
-  d.printf("DEAD %lu", static_cast<unsigned long>(g_score));
+  d.setCursor(bx + (bw - 4 * 6) / 2, by + 6);
+  d.print("DEAD");
+
+  d.setTextSize(3);
+  const int numW = static_cast<int>(strlen(buf)) * 18;
+  d.setCursor(bx + (bw - numW) / 2, by + 16);
+  d.print(buf);
   draw_header();
 }
 
@@ -431,11 +443,17 @@ Dir ai_dir() {
     }
   }
 
-  // 1) 能吃苹果且吃完还有退路
+  // 1) 能吃苹果且吃完还有退路；饿太久就放弃安全校验，赌一次
+  const bool starving = g_sinceEat > kStarveTicks;
   Dir d = kRight;
   if (bfs_to(base, g_foodX, g_foodY, &d, true)) {
     SimState after;
-    if (sim_move(base, d, &after) && has_exit(after)) return d;
+    if (sim_move(base, d, &after) && (has_exit(after) || starving)) {
+      if (starving && !has_exit(after)) {
+        Serial.printf("[snake] gamble after %lu ticks\n", static_cast<unsigned long>(g_sinceEat));
+      }
+      return d;
+    }
     g_aiPathLen = 0;  // 这条路不安全，不显示
   }
 
@@ -461,6 +479,7 @@ Dir ai_dir() {
 }
 
 void tick() {
+  ++g_sinceEat;
   if (g_mode == kAuto) {
     g_dir = ai_dir();
   } else {
@@ -509,6 +528,7 @@ void tick() {
   g_by[0] = hy;
   if (eat) {
     Serial.printf("[snake] eat (%d,%d) head now len=%d\n", hx, hy, g_len);
+    g_sinceEat = 0;
     ++g_score;
     M5.Speaker.tone(1800, 40);
     if (g_tickMs > kTickMinMs) g_tickMs -= 7;
