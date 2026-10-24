@@ -1,0 +1,16 @@
+# 隔离环境（不入库，可重建）
+.venv/
+.pio-core/
+
+# PlatformIO 构建产物
+**/.pio/
+
+# 本机固件备份与导出
+backups/
+*.bin
+*.elf
+*.map
+
+# 编辑器与系统
+.DS_Store
+*.swp
