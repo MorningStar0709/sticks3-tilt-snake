@@ -133,10 +133,13 @@ void setup() {
 
 void loop() {
   M5.update();
-  if (M5.BtnA.wasClicked() || M5.BtnB.wasClicked()) {
+  static uint32_t lastReport = 0;
+  const bool pressed = M5.BtnA.wasClicked() || M5.BtnB.wasClicked();
+  if (pressed || millis() - lastReport > 5000) {
+    lastReport = millis();
     Probe p = sample();
-    report(p);
-    draw(p);
+    report(p);              // 串口每 5 s 一次，避免错过上电瞬间的日志
+    if (pressed) draw(p);   // 屏幕只在按键时重绘，免得闪
   }
   delay(50);
 }
