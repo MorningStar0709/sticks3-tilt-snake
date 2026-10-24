@@ -1,200 +1,291 @@
-// StickS3 硬件摸底固件
-//   - 周期输出板型 / flash / PSRAM / I2C 地址表 / 电量 / IMU
-//   - 按 A 键执行音频自检：喇叭 440 Hz 提示音 → 录 3 s → 回放 → 打印峰值/RMS
-// 音频注意：M5Unified 的 Mic/Speaker 各占一个 I2S 控制器且共用时钟脚，只能交替使用。
+// 倾斜贪吃蛇（浅色卡片风）
+//   - 浅底 + 圆角网格 + 连续的黄色蛇身 + 苹果食物 + 顶部计分
+//   - 倾斜设备控制方向：超过阈值才换向，且主轴需明显占优（抑制横跳）
+//   - 渲染走离屏 sprite，整块推屏，避免逐格重绘闪烁
 #include <M5Unified.h>
-#include <esp_heap_caps.h>
-#include <esp_system.h>
 #include <math.h>
 
 namespace {
 
-constexpr int kLineH = 10;
-constexpr int kMaxI2C = 10;
-constexpr uint32_t kAudioRate = 16000;
-constexpr size_t kRecSeconds = 3;
-constexpr size_t kRecLen = kAudioRate * kRecSeconds;
+constexpr int kCols = 7;
+constexpr int kRows = 11;
+constexpr int kCell = 18;
+constexpr int kGridX = 4;
+constexpr int kGridY = 20;
+constexpr int kGridW = kCols * kCell;  // 126
+constexpr int kGridH = kRows * kCell;  // 196
+constexpr int kMaxBody = kCols * kRows;
+constexpr int kMaxGhost = 512;
 
-struct Probe {
-  int board;
-  uint32_t flashKB;
-  uint32_t psramKB;
-  uint32_t heapKB;
-  int i2cCount;
-  uint8_t i2cAddr[kMaxI2C];
-  int32_t battMv;
-  int32_t battPct;
-  int16_t vbusMv;
-  int charging;
-  bool imuOk;
-  float ax, ay, az;
-};
+constexpr float kTiltThresholdG = 0.30f;
+constexpr float kTiltDominance = 1.40f;
+constexpr uint32_t kTickStartMs = 320;
+constexpr uint32_t kTickMinMs = 170;
+constexpr float kBodyRadius = 7.5f;
 
-int16_t* alloc_psram(size_t samples) {
-  return static_cast<int16_t*>(
-      heap_caps_malloc(samples * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-}
+// 浅色卡片的配色（RGB565）
+constexpr uint16_t kBg = 0xF7BE;        // 近白暖灰
+constexpr uint16_t kCellBg = 0xE71C;    // 网格格
+constexpr uint16_t kGhost = 0xD699;     // 上一局轨迹
+constexpr uint16_t kSnake = 0xF628;     // 黄
+constexpr uint16_t kEye = 0x4208;
+constexpr uint16_t kApple = 0xE1C5;     // 红
+constexpr uint16_t kLeaf = 0x6DEB;
+constexpr uint16_t kStem = 0x8A41;
+constexpr uint16_t kText = 0x4208;
 
-void status(const char* line) {
+enum Dir { kUp, kDown, kLeft, kRight };
+
+M5Canvas g_canvas(&M5.Display);
+
+int8_t g_bx[kMaxBody], g_by[kMaxBody];
+int g_len = 0;
+Dir g_dir = kRight;
+bool g_alive = false;
+uint32_t g_score = 0;
+uint32_t g_best = 0;
+int8_t g_foodX, g_foodY;
+uint32_t g_tickMs = kTickStartMs;
+uint32_t g_lastTick = 0;
+
+int8_t g_ghostX[kMaxGhost], g_ghostY[kMaxGhost];
+int g_ghostLen = 0;
+int8_t g_curX[kMaxGhost], g_curY[kMaxGhost];
+int g_curLen = 0;
+
+float g_refX = 0, g_refY = 0;
+
+int cx(int gx) { return gx * kCell + kCell / 2; }
+int cy(int gy) { return gy * kCell + kCell / 2; }
+
+void draw_header() {
   auto& d = M5.Display;
-  d.fillRect(0, 186, d.width(), 24, TFT_BLACK);
+  d.fillRect(0, 0, 135, kGridY, kBg);
   d.setTextSize(1);
-  d.setTextColor(TFT_YELLOW, TFT_BLACK);
-  d.setCursor(2, 190);
-  d.print(line);
-  Serial.printf("[audio] %s\n", line);
+  d.setTextColor(kText, kBg);
+  d.setCursor(4, 6);
+  d.printf("SCORE %lu", static_cast<unsigned long>(g_score));
+  d.setCursor(84, 6);
+  d.printf("BEST %lu", static_cast<unsigned long>(g_best));
 }
 
-Probe sample() {
-  Probe p{};
-  p.board = static_cast<int>(M5.getBoard());
-  p.flashKB = ESP.getFlashChipSize() / 1024;
-  p.psramKB = ESP.getPsramSize() / 1024;
-  p.heapKB = ESP.getFreeHeap() / 1024;
-  p.battMv = M5.Power.getBatteryVoltage();
-  p.battPct = M5.Power.getBatteryLevel();
-  p.vbusMv = M5.Power.getVBUSVoltage();
-  p.charging = static_cast<int>(M5.Power.isCharging());
+void draw_grid() {
+  g_canvas.fillScreen(kBg);
+  for (int y = 0; y < kRows; ++y) {
+    for (int x = 0; x < kCols; ++x) {
+      g_canvas.fillRoundRect(x * kCell + 1, y * kCell + 1, kCell - 3, kCell - 3, 4, kCellBg);
+    }
+  }
+  for (int i = 0; i < g_ghostLen; ++i) {
+    g_canvas.fillCircle(cx(g_ghostX[i]), cy(g_ghostY[i]), 3, kGhost);
+  }
+}
 
-  bool found[0x78] = {};
-  M5.In_I2C.scanID(found, 100000);
-  p.i2cCount = 0;
-  for (int addr = 8; addr < 0x78; ++addr) {
-    if (found[addr] && p.i2cCount < kMaxI2C) {
-      p.i2cAddr[p.i2cCount++] = static_cast<uint8_t>(addr);
+void draw_apple() {
+  const int x = cx(g_foodX);
+  const int y = cy(g_foodY);
+  g_canvas.fillCircle(x, y + 1, 7, kApple);
+  g_canvas.drawLine(x, y - 5, x + 1, y - 9, kStem);
+  g_canvas.fillCircle(x + 4, y - 9, 3, kLeaf);
+}
+
+void draw_snake() {
+  for (int i = g_len - 1; i > 0; --i) {
+    g_canvas.drawWideLine(cx(g_bx[i]), cy(g_by[i]), cx(g_bx[i - 1]), cy(g_by[i - 1]),
+                          kBodyRadius, kSnake);
+  }
+  // 身体两端的圆头
+  g_canvas.fillCircle(cx(g_bx[g_len - 1]), cy(g_by[g_len - 1]), 7, kSnake);
+
+  // 头部略大，加一对眼睛
+  const int hx = cx(g_bx[0]);
+  const int hy = cy(g_by[0]);
+  g_canvas.fillCircle(hx, hy, 8, kSnake);
+  int ex = 0, ey = 0;
+  switch (g_dir) {
+    case kUp: ey = -1; break;
+    case kDown: ey = 1; break;
+    case kLeft: ex = -1; break;
+    case kRight: ex = 1; break;
+  }
+  g_canvas.fillCircle(hx + ex * 3 - ey * 3, hy + ey * 3 + ex * 3, 2, kEye);
+  g_canvas.fillCircle(hx + ex * 3 + ey * 3, hy + ey * 3 - ex * 3, 2, kEye);
+}
+
+void present() {
+  draw_grid();
+  draw_apple();
+  if (g_len > 0) draw_snake();
+  g_canvas.pushSprite(kGridX, kGridY);
+}
+
+void spawn_food() {
+  for (int attempt = 0; attempt < 200; ++attempt) {
+    // 留出最外圈：贴着墙生成的苹果，吃完下一步就撞墙，体验上像"吃苹果就死"
+    const int8_t fx = 1 + esp_random() % (kCols - 2);
+    const int8_t fy = 1 + esp_random() % (kRows - 2);
+    bool occupied = false;
+    for (int i = 0; i < g_len; ++i) {
+      if (g_bx[i] == fx && g_by[i] == fy) {
+        occupied = true;
+        break;
+      }
+    }
+    if (!occupied) {
+      g_foodX = fx;
+      g_foodY = fy;
+      return;
+    }
+  }
+}
+
+void calibrate_neutral() {
+  auto& d = M5.Display;
+  d.fillRect(0, 0, 135, kGridY, kBg);
+  d.setTextSize(1);
+  d.setTextColor(kText, kBg);
+  d.setCursor(4, 6);
+  d.print("HOLD STILL...");
+
+  float sx = 0, sy = 0;
+  int n = 0;
+  const uint32_t t0 = millis();
+  while (millis() - t0 < 1200) {
+    float ax, ay, az;
+    if (M5.Imu.getAccel(&ax, &ay, &az)) {
+      sx += ax;
+      sy += ay;
+      ++n;
+    }
+    delay(20);
+  }
+  if (n > 0) {
+    g_refX = sx / n;
+    g_refY = sy / n;
+  }
+  Serial.printf("[snake] neutral=(%.3f,%.3f) n=%d\n", g_refX, g_refY, n);
+}
+
+void start_game() {
+  g_len = 3;
+  g_bx[0] = 3; g_by[0] = 5;
+  g_bx[1] = 2; g_by[1] = 5;
+  g_bx[2] = 1; g_by[2] = 5;
+  g_dir = kRight;
+  g_score = 0;
+  g_tickMs = kTickStartMs;
+  g_alive = true;
+  g_curLen = 0;
+  spawn_food();
+  g_lastTick = millis();
+  draw_header();
+  present();
+}
+
+void finish_game(const char* why) {
+  Serial.printf("[snake] finish: %s score=%lu len=%d\n", why, (unsigned long)g_score, g_len);
+  g_alive = false;
+  M5.Speaker.tone(220, 350);
+  if (g_score > g_best) g_best = g_score;
+  g_ghostLen = g_curLen;
+  for (int i = 0; i < g_curLen; ++i) {
+    g_ghostX[i] = g_curX[i];
+    g_ghostY[i] = g_curY[i];
+  }
+  auto& d = M5.Display;
+  d.fillRoundRect(30, 104, 75, 30, 8, kBg);
+  d.drawRoundRect(30, 104, 75, 30, 8, kText);
+  d.setTextSize(2);
+  d.setTextColor(kText, kBg);
+  d.setCursor(38, 112);
+  d.printf("DEAD %lu", static_cast<unsigned long>(g_score));
+  draw_header();
+}
+
+bool tilt_dir(Dir* out) {
+  float ax, ay, az;
+  if (!M5.Imu.getAccel(&ax, &ay, &az)) return false;
+  const float dx = ax - g_refX;
+  const float dy = ay - g_refY;
+  const float adx = fabsf(dx);
+  const float ady = fabsf(dy);
+  if (adx < kTiltThresholdG && ady < kTiltThresholdG) return false;
+
+  Dir want;
+  if (adx >= ady * kTiltDominance) {
+    want = dx > 0 ? kLeft : kRight;  // 实测：设备右倾 X 变大，故取反
+  } else if (ady >= adx * kTiltDominance) {
+    want = dy > 0 ? kUp : kDown;  // 实测：设备前倾 y 变大，故取反
+  } else {
+    return false;
+  }
+  if ((want == kUp && g_dir == kDown) || (want == kDown && g_dir == kUp) ||
+      (want == kLeft && g_dir == kRight) || (want == kRight && g_dir == kLeft)) {
+    return false;
+  }
+  *out = want;
+  return true;
+}
+
+void tick() {
+  Dir nd = g_dir;
+  if (tilt_dir(&nd)) g_dir = nd;
+
+  int8_t hx = g_bx[0];
+  int8_t hy = g_by[0];
+  switch (g_dir) {
+    case kUp: --hy; break;
+    case kDown: ++hy; break;
+    case kLeft: --hx; break;
+    case kRight: ++hx; break;
+  }
+
+  if (hx < 0 || hx >= kCols || hy < 0 || hy >= kRows) {
+    Serial.printf("[snake] dead: wall (%d,%d) dir=%d len=%d\n", hx, hy, g_dir, g_len);
+    finish_game("wall");
+    return;
+  }
+  const bool eat = (hx == g_foodX && hy == g_foodY);
+  // 不吃时尾巴会让位，所以最后一节不算碰撞；吃的时候尾巴不动，要算
+  const int bodyCheck = eat ? g_len : g_len - 1;
+  for (int i = 0; i < bodyCheck; ++i) {
+    if (g_bx[i] == hx && g_by[i] == hy) {
+      finish_game("self");
+      return;
     }
   }
 
-  p.imuOk = M5.Imu.isEnabled() && M5.Imu.getAccel(&p.ax, &p.ay, &p.az);
-  return p;
-}
-
-void report(const Probe& p) {
-  Serial.printf("[probe] board=%d flash=%uKB psram=%uKB heap=%uKB\n", p.board,
-                static_cast<unsigned>(p.flashKB), static_cast<unsigned>(p.psramKB),
-                static_cast<unsigned>(p.heapKB));
-  Serial.printf("[probe] i2c n=%d:", p.i2cCount);
-  for (int i = 0; i < p.i2cCount; ++i) {
-    Serial.printf(" 0x%02X", p.i2cAddr[i]);
-  }
-  Serial.println();
-  Serial.printf("[probe] batt=%ldmV %ld%% vbus=%dmV charging=%d\n",
-                static_cast<long>(p.battMv), static_cast<long>(p.battPct), p.vbusMv,
-                p.charging);
-  if (p.imuOk) {
-    Serial.printf("[probe] imu accel=%.2f,%.2f,%.2f\n", p.ax, p.ay, p.az);
+  // 长大时要连尾巴一起后移：从 g_len 开始搬，否则新多出的一节是未赋值的数据
+  if (eat && g_len < kMaxBody) {
+    for (int i = g_len; i > 0; --i) {
+      g_bx[i] = g_bx[i - 1];
+      g_by[i] = g_by[i - 1];
+    }
+    ++g_len;
   } else {
-    Serial.println("[probe] imu unavailable");
+    for (int i = g_len - 1; i > 0; --i) {
+      g_bx[i] = g_bx[i - 1];
+      g_by[i] = g_by[i - 1];
+    }
   }
-}
-
-void draw(const Probe& p) {
-  auto& d = M5.Display;
-  d.fillScreen(TFT_BLACK);
-  d.setTextSize(1);
-  d.setTextColor(TFT_WHITE, TFT_BLACK);
-
-  int y = 4;
-  d.setCursor(2, y);
-  d.print("StickS3 probe");
-  y += kLineH;
-  d.setCursor(2, y);
-  d.printf("board %d", p.board);
-  y += kLineH;
-  d.setCursor(2, y);
-  d.printf("F%uK P%uK", static_cast<unsigned>(p.flashKB), static_cast<unsigned>(p.psramKB));
-  y += kLineH;
-  d.setCursor(2, y);
-  d.printf("i2c %d dev", p.i2cCount);
-  y += kLineH;
-  d.setCursor(2, y);
-  for (int i = 0; i < p.i2cCount; ++i) {
-    d.printf("%02X ", p.i2cAddr[i]);
-  }
-  y += kLineH;
-  d.setCursor(2, y);
-  d.printf("%ldmV %ld%%", static_cast<long>(p.battMv), static_cast<long>(p.battPct));
-  y += kLineH;
-  d.setCursor(2, y);
-  d.printf("vbus%d chg%d", p.vbusMv, p.charging);
-  y += kLineH;
-  if (p.imuOk) {
-    d.setCursor(2, y);
-    d.printf("a %.1f %.1f %.1f", p.ax, p.ay, p.az);
-  } else {
-    d.setCursor(2, y);
-    d.print("imu missing");
+  g_bx[0] = hx;
+  g_by[0] = hy;
+  if (eat) {
+    Serial.printf("[snake] eat (%d,%d) head now len=%d\n", hx, hy, g_len);
+    ++g_score;
+    M5.Speaker.tone(1800, 40);
+    if (g_tickMs > kTickMinMs) g_tickMs -= 7;
+    spawn_food();
   }
 
-  // 三原色块：确认 RGB 顺序与反色设置
-  d.fillRect(2, 150, 42, 16, TFT_RED);
-  d.fillRect(46, 150, 42, 16, TFT_GREEN);
-  d.fillRect(90, 150, 42, 16, TFT_BLUE);
-}
-
-void run_audio_test() {
-  status("audio: tone...");
-  int16_t* tone = alloc_psram(kAudioRate / 2);
-  int16_t* rec = alloc_psram(kRecLen);
-  if (!tone || !rec) {
-    status("psram alloc failed");
-    return;
+  if (g_curLen < kMaxGhost) {
+    g_curX[g_curLen] = hx;
+    g_curY[g_curLen] = hy;
+    ++g_curLen;
   }
 
-  // 1) 喇叭：440 Hz、0.5 s，验证 codec DAC + PM1 上的功放使能
-  for (size_t i = 0; i < kAudioRate / 2; ++i) {
-    tone[i] = static_cast<int16_t>(sinf(2.0f * M_PI * 440.0f * i / kAudioRate) * 6000);
-  }
-  M5.Speaker.begin();
-  M5.Speaker.setVolume(96);
-  M5.Speaker.playRaw(tone, kAudioRate / 2, kAudioRate, false);
-  uint32_t t0 = millis();
-  while (M5.Speaker.isPlaying() && millis() - t0 < 3000) delay(10);
-  M5.Speaker.end();
-
-  // 2) 录音 3 s（ES8311 上电后约 1 s 内样本可能全 0，先丢掉）
-  status("audio: mic 3s...");
-  bool began = M5.Mic.begin();
-  if (!began) {
-    status("mic begin failed");
-    free(tone);
-    free(rec);
-    return;
-  }
-  delay(1200);
-  bool queued = M5.Mic.record(rec, kRecLen, kAudioRate);
-  t0 = millis();
-  while (queued && M5.Mic.isRecording() && millis() - t0 < 6000) delay(10);
-  M5.Mic.end();
-
-  int32_t peak = 0;
-  double sum_sq = 0.0;
-  size_t zeros = 0;
-  for (size_t i = 0; i < kRecLen; ++i) {
-    const int32_t v = rec[i];
-    const int32_t a = v < 0 ? -v : v;
-    if (a > peak) peak = a;
-    if (v == 0) ++zeros;
-    sum_sq += static_cast<double>(v) * v;
-  }
-  const double rms = sqrt(sum_sq / kRecLen);
-  Serial.printf("[audio] queued=%d peak=%ld rms=%.1f zeros=%u/%u\n", queued, static_cast<long>(peak),
-                rms, static_cast<unsigned>(zeros), static_cast<unsigned>(kRecLen));
-
-  // 3) 回放录音
-  status("audio: playback");
-  M5.Speaker.begin();
-  M5.Speaker.setVolume(96);
-  M5.Speaker.playRaw(rec, kRecLen, kAudioRate, false);
-  t0 = millis();
-  while (M5.Speaker.isPlaying() && millis() - t0 < 6000) delay(10);
-  M5.Speaker.end();
-
-  char line[32];
-  snprintf(line, sizeof(line), "peak%ld rms%.0f", static_cast<long>(peak), rms);
-  status(line);
-  free(tone);
-  free(rec);
+  present();
+  draw_header();
 }
 
 }  // namespace
@@ -203,32 +294,36 @@ void setup() {
   auto cfg = M5.config();
   M5.begin(cfg);
   Serial.begin(115200);
+  M5.Speaker.begin();
+  M5.Speaker.setVolume(100);
   delay(300);
 
-  Serial.printf("\n[probe] chip=%s rev=%u cpu=%uMHz mac=%012llX reset=%d\n",
-                ESP.getChipModel(), ESP.getChipRevision(), ESP.getCpuFreqMHz(),
-                ESP.getEfuseMac(), static_cast<int>(esp_reset_reason()));
+  g_canvas.setColorDepth(16);
+  if (!g_canvas.createSprite(kGridW, kGridH)) {
+    Serial.println("[snake] sprite alloc failed");
+  }
 
-  Probe p = sample();
-  report(p);
-  draw(p);
-  status("A: audio test");
+  calibrate_neutral();
+
+  M5.Display.fillScreen(kBg);
+  draw_header();
+  draw_grid();
+  g_canvas.pushSprite(kGridX, kGridY);
+  Serial.println("\n[snake] ready: tilt to steer, A=start");
 }
 
 void loop() {
   M5.update();
-  static uint32_t lastReport = 0;
 
   if (M5.BtnA.wasClicked()) {
-    Serial.println("[audio] button A -> audio test");
-    run_audio_test();
-    Probe p = sample();
-    report(p);
-    draw(p);
-    status("A: audio test");
-  } else if (millis() - lastReport > 5000) {
-    lastReport = millis();
-    report(sample());
+    calibrate_neutral();  // 每局重标中立姿态，避免握姿变化导致的持续偏航
+    start_game();
+    return;
   }
-  delay(50);
+
+  if (g_alive && millis() - g_lastTick >= g_tickMs) {
+    g_lastTick = millis();
+    tick();
+  }
+  delay(5);
 }
