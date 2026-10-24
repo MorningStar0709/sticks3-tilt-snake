@@ -33,6 +33,8 @@ constexpr uint16_t kApple = 0xE1C5;     // 红
 constexpr uint16_t kLeaf = 0x6DEB;
 constexpr uint16_t kStem = 0x8A41;
 constexpr uint16_t kText = 0x4208;
+constexpr uint16_t kPathDot = 0x5C8D;   // AI 规划路径
+constexpr uint16_t kDanger = 0xF618;    // 走进去会死的格子
 
 enum Dir { kUp, kDown, kLeft, kRight };
 
@@ -55,6 +57,13 @@ int g_curLen = 0;
 
 float g_refX = 0, g_refY = 0;
 
+enum Mode { kManual, kAuto };
+Mode g_mode = kManual;
+constexpr uint32_t kAutoTickMs = 150;
+int8_t g_aiPathX[kCols * kRows], g_aiPathY[kCols * kRows];
+int g_aiPathLen = 0;
+uint8_t g_dangerMask = 0;  // bit0..3 = 上/下/左/右  // AI 托管时跑快一点，观感更好
+
 int cx(int gx) { return gx * kCell + kCell / 2; }
 int cy(int gy) { return gy * kCell + kCell / 2; }
 
@@ -64,7 +73,8 @@ void draw_header() {
   d.setTextSize(1);
   d.setTextColor(kText, kBg);
   d.setCursor(4, 6);
-  d.printf("SCORE %lu", static_cast<unsigned long>(g_score));
+  d.printf("%s %lu", g_mode == kAuto ? "AI" : "YOU",
+           static_cast<unsigned long>(g_score));
   d.setCursor(84, 6);
   d.printf("BEST %lu", static_cast<unsigned long>(g_best));
 }
@@ -74,6 +84,17 @@ void draw_grid() {
   for (int y = 0; y < kRows; ++y) {
     for (int x = 0; x < kCols; ++x) {
       g_canvas.fillRoundRect(x * kCell + 1, y * kCell + 1, kCell - 3, kCell - 3, 4, kCellBg);
+    }
+  }
+  if (g_mode == kAuto && g_len > 0) {
+    static const int dx[4] = {0, 0, -1, 1};
+    static const int dy[4] = {-1, 1, 0, 0};
+    for (int d = 0; d < 4; ++d) {
+      if (!(g_dangerMask & (1 << d))) continue;
+      const int nx = g_bx[0] + dx[d];
+      const int ny = g_by[0] + dy[d];
+      if (nx < 0 || nx >= kCols || ny < 0 || ny >= kRows) continue;
+      g_canvas.fillRoundRect(nx * kCell + 1, ny * kCell + 1, kCell - 3, kCell - 3, 4, kDanger);
     }
   }
   for (int i = 0; i < g_ghostLen; ++i) {
@@ -114,6 +135,11 @@ void draw_snake() {
 
 void present() {
   draw_grid();
+  if (g_mode == kAuto) {
+    for (int i = 1; i < g_aiPathLen; ++i) {
+      g_canvas.fillCircle(cx(g_aiPathX[i]), cy(g_aiPathY[i]), 2, kPathDot);
+    }
+  }
   draw_apple();
   if (g_len > 0) draw_snake();
   g_canvas.pushSprite(kGridX, kGridY);
@@ -166,7 +192,8 @@ void calibrate_neutral() {
   Serial.printf("[snake] neutral=(%.3f,%.3f) n=%d\n", g_refX, g_refY, n);
 }
 
-void start_game() {
+void start_game(Mode m) {
+  g_mode = m;
   g_len = 3;
   g_bx[0] = 3; g_by[0] = 5;
   g_bx[1] = 2; g_by[1] = 5;
@@ -227,9 +254,219 @@ bool tilt_dir(Dir* out) {
   return true;
 }
 
+int cell_index(int x, int y) { return y * kCols + x; }
+
+struct SimState {
+  int8_t bx[kMaxBody];
+  int8_t by[kMaxBody];
+  int len;
+};
+
+void snapshot(SimState* s) {
+  s->len = g_len;
+  for (int i = 0; i < g_len; ++i) {
+    s->bx[i] = g_bx[i];
+    s->by[i] = g_by[i];
+  }
+}
+
+// 在给定状态上推演一步；返回 false 表示这一步非法（出界或撞身体）
+bool sim_move(const SimState& in, Dir d, SimState* out) {
+  int nx = in.bx[0], ny = in.by[0];
+  switch (d) {
+    case kUp: --ny; break;
+    case kDown: ++ny; break;
+    case kLeft: --nx; break;
+    case kRight: ++nx; break;
+  }
+  if (nx < 0 || nx >= kCols || ny < 0 || ny >= kRows) return false;
+
+  const bool eat = (nx == g_foodX && ny == g_foodY);
+  const int checkLen = eat ? in.len : in.len - 1;  // 不吃时尾巴会让位
+  for (int i = 0; i < checkLen; ++i) {
+    if (in.bx[i] == nx && in.by[i] == ny) return false;
+  }
+
+  if (eat && in.len < kMaxBody) {
+    for (int i = in.len; i > 0; --i) {
+      out->bx[i] = in.bx[i - 1];
+      out->by[i] = in.by[i - 1];
+    }
+    out->len = in.len + 1;
+  } else {
+    for (int i = in.len - 1; i > 0; --i) {
+      out->bx[i] = in.bx[i - 1];
+      out->by[i] = in.by[i - 1];
+    }
+    out->len = in.len;
+  }
+  out->bx[0] = nx;
+  out->by[0] = ny;
+  return true;
+}
+
+// BFS：从蛇头到 (tx,ty)，返回首个方向；record=true 时把整条路径写到 g_aiPath
+bool bfs_to(const SimState& s, int tx, int ty, Dir* firstDir, bool record) {
+  static const int dx[4] = {0, 0, -1, 1};
+  static const int dy[4] = {-1, 1, 0, 0};
+  static const Dir dirs[4] = {kUp, kDown, kLeft, kRight};
+  constexpr int kCells = kCols * kRows;
+
+  bool seen[kCells] = {};
+  int8_t first[kCells] = {};
+  int8_t parent[kCells];
+  int16_t queue[kCells];
+  int qh = 0, qt = 0;
+
+  const int hi = cell_index(s.bx[0], s.by[0]);
+  seen[hi] = true;
+  parent[hi] = -1;
+  queue[qt++] = hi;
+
+  auto blockedAt = [&](int x, int y) {
+    if (x < 0 || x >= kCols || y < 0 || y >= kRows) return true;
+    for (int i = 0; i < s.len; ++i) {
+      if (i == s.len - 1) continue;  // 尾巴会移开
+      if (s.bx[i] == x && s.by[i] == y) return true;
+    }
+    return false;
+  };
+
+  while (qh < qt) {
+    const int cur = queue[qh++];
+    if (cur == cell_index(tx, ty)) break;
+    const int x = cur % kCols;
+    const int y = cur / kCols;
+    for (int d = 0; d < 4; ++d) {
+      const int nx = x + dx[d], ny = y + dy[d];
+      if (blockedAt(nx, ny)) continue;
+      const int ni = cell_index(nx, ny);
+      if (seen[ni]) continue;
+      seen[ni] = true;
+      parent[ni] = static_cast<int8_t>(cur);
+      first[ni] = (cur == hi) ? static_cast<int8_t>(dirs[d]) : first[cur];
+      queue[qt++] = ni;
+    }
+  }
+
+  const int ti = cell_index(tx, ty);
+  if (!seen[ti]) return false;
+  *firstDir = static_cast<Dir>(first[ti]);
+
+  if (record) {
+    g_aiPathLen = 0;
+    int cur = ti;
+    int8_t revX[kCols * kRows], revY[kCols * kRows];
+    int n = 0;
+    while (cur >= 0 && n < kCols * kRows) {
+      revX[n] = cur % kCols;
+      revY[n] = cur / kCols;
+      ++n;
+      cur = parent[cur];
+    }
+    for (int i = n - 1; i >= 0; --i) {
+      g_aiPathX[g_aiPathLen] = revX[i];
+      g_aiPathY[g_aiPathLen] = revY[i];
+      ++g_aiPathLen;
+    }
+  }
+  return true;
+}
+
+// 推演后还能不能碰到自己的尾巴：够不到就说明这一步会把自己封死
+bool has_exit(const SimState& s) {
+  Dir tmp;
+  return bfs_to(s, s.bx[s.len - 1], s.by[s.len - 1], &tmp, false);
+}
+
+int reachable_area(const SimState& s) {
+  static const int dx[4] = {0, 0, -1, 1};
+  static const int dy[4] = {-1, 1, 0, 0};
+  constexpr int kCells = kCols * kRows;
+  bool seen[kCells] = {};
+  int16_t queue[kCells];
+  int qh = 0, qt = 0;
+  const int hi = cell_index(s.bx[0], s.by[0]);
+  seen[hi] = true;
+  queue[qt++] = hi;
+  int area = 0;
+  while (qh < qt) {
+    const int cur = queue[qh++];
+    ++area;
+    const int x = cur % kCols;
+    const int y = cur / kCols;
+    for (int d = 0; d < 4; ++d) {
+      const int nx = x + dx[d], ny = y + dy[d];
+      if (nx < 0 || nx >= kCols || ny < 0 || ny >= kRows) continue;
+      const int ni = cell_index(nx, ny);
+      if (seen[ni]) continue;
+      bool blocked = false;
+      for (int i = 0; i < s.len; ++i) {
+        if (i == s.len - 1) continue;
+        if (s.bx[i] == nx && s.by[i] == ny) {
+          blocked = true;
+          break;
+        }
+      }
+      if (blocked) continue;
+      seen[ni] = true;
+      queue[qt++] = ni;
+    }
+  }
+  return area;
+}
+
+Dir ai_dir() {
+  static const Dir dirs[4] = {kUp, kDown, kLeft, kRight};
+  SimState base;
+  snapshot(&base);
+  g_aiPathLen = 0;
+  g_dangerMask = 0;
+
+  // 标记"走进去会死"的方向，供屏幕显示
+  for (int d = 0; d < 4; ++d) {
+    SimState after;
+    if (!sim_move(base, dirs[d], &after) || !has_exit(after)) {
+      g_dangerMask |= (1 << d);
+    }
+  }
+
+  // 1) 能吃苹果且吃完还有退路
+  Dir d = kRight;
+  if (bfs_to(base, g_foodX, g_foodY, &d, true)) {
+    SimState after;
+    if (sim_move(base, d, &after) && has_exit(after)) return d;
+    g_aiPathLen = 0;  // 这条路不安全，不显示
+  }
+
+  // 2) 追自己的尾巴，先把身体解开
+  if (bfs_to(base, base.bx[base.len - 1], base.by[base.len - 1], &d, false)) {
+    SimState after;
+    if (sim_move(base, d, &after) && has_exit(after)) return d;
+  }
+
+  // 3) 都不安全：选可达空间最大的方向，尽量多活几步
+  Dir best = g_dir;
+  int bestArea = -1;
+  for (int i = 0; i < 4; ++i) {
+    SimState after;
+    if (!sim_move(base, dirs[i], &after)) continue;
+    const int area = reachable_area(after);
+    if (area > bestArea) {
+      bestArea = area;
+      best = dirs[i];
+    }
+  }
+  return best;
+}
+
 void tick() {
-  Dir nd = g_dir;
-  if (tilt_dir(&nd)) g_dir = nd;
+  if (g_mode == kAuto) {
+    g_dir = ai_dir();
+  } else {
+    Dir nd = g_dir;
+    if (tilt_dir(&nd)) g_dir = nd;
+  }
 
   int8_t hx = g_bx[0];
   int8_t hy = g_by[0];
@@ -316,12 +553,33 @@ void loop() {
   M5.update();
 
   if (M5.BtnA.wasClicked()) {
-    calibrate_neutral();  // 每局重标中立姿态，避免握姿变化导致的持续偏航
-    start_game();
+    // A = AI 托管：活着就切模式，死了就直接开一局托管
+    if (g_alive) {
+      g_mode = kAuto;
+      draw_header();
+    } else {
+      start_game(kAuto);
+    }
     return;
   }
 
-  if (g_alive && millis() - g_lastTick >= g_tickMs) {
+  if (M5.BtnB.wasClicked()) {
+    // B = 人手：活着就交还控制，死了就重标姿态再开一局
+    if (g_alive) {
+      g_mode = kManual;
+      g_aiPathLen = 0;
+      g_dangerMask = 0;
+      draw_header();
+      present();
+    } else {
+      calibrate_neutral();
+      start_game(kManual);
+    }
+    return;
+  }
+
+  const uint32_t interval = (g_mode == kAuto) ? kAutoTickMs : g_tickMs;
+  if (g_alive && millis() - g_lastTick >= interval) {
     g_lastTick = millis();
     tick();
   }
