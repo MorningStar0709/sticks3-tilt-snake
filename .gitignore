@@ -1,6 +1,5 @@
-# 隔离环境（不入库，可重建）
-.venv/
-.pio-core/
+# 工具链与环境不在仓内：PlatformIO core 用默认位置 ~/.platformio。
+# 项目里只留源码、platformio.ini 与构建产物 .pio/。
 
 # PlatformIO 构建产物
 **/.pio/

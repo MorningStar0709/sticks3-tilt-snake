@@ -5,13 +5,16 @@
 # 用法: ./tools/monitor.sh [--reset] [秒数] [端口]
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# 解释器用 PlatformIO 自己的 venv（uv tool 安装），它带 pyserial。
+PY="$(uv tool dir 2>/dev/null || true)/platformio/bin/python"
+[ -x "$PY" ] || { echo "找不到 PlatformIO 解释器: $PY（先执行 uv tool install platformio）" >&2; exit 1; }
+
 DO_RESET=0
 if [ "${1:-}" = "--reset" ]; then DO_RESET=1; shift; fi
 SECS="${1:-8}"
 PORT="${2:-/dev/ttyACM0}"
 
-exec "$ROOT/.venv/bin/python" - "$DO_RESET" "$SECS" "$PORT" <<'PY'
+exec "$PY" - "$DO_RESET" "$SECS" "$PORT" <<'PYEOF'
 import sys, time, serial
 
 do_reset = sys.argv[1] == "1"
@@ -51,4 +54,4 @@ while time.time() < deadline:
     if data:
         sys.stdout.write(data.decode("utf-8", "replace"))
         sys.stdout.flush()
-PY
+PYEOF

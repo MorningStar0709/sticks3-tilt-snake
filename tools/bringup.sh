@@ -11,9 +11,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT="$ROOT/sticks3-play"
-ESPTOOL="$ROOT/.pio-core/packages/tool-esptoolpy/esptool.py"
-PY="$ROOT/.venv/bin/python"
+# 工具链与环境不在本仓内：PlatformIO core 用默认位置 ~/.platformio，
+# esptool 的解释器与包路径由 tools/esptool.sh 固定，pio 是全局命令。
+ESPTOOL="$ROOT/tools/esptool.sh"
+PIO="$HOME/.local/bin/pio"
 FLASH_SIZE=0x800000
+
+[ -x "$PIO" ] || { echo "找不到 pio: $PIO（先执行 uv tool install platformio）" >&2; exit 1; }
 
 PORT=/dev/ttyACM0
 BACKUP_ONLY=0
@@ -54,7 +58,7 @@ else
   BACKUP="$ROOT/backups/sticks3-uiflow2-$(date +%Y%m%d-%H%M%S).bin"
   echo "== 备份全片 $FLASH_SIZE 字节 → $BACKUP"
   # 先写 .part，成功后再改名：中途中断不会留下一个"看起来像备份"的残片
-  if ! "$PY" "$ESPTOOL" --chip esp32s3 --port "$PORT" --baud 921600 \
+  if ! "$ESPTOOL" --chip esp32s3 --port "$PORT" --baud 921600 \
       --before default_reset --after no_reset \
       read_flash 0x0 "$FLASH_SIZE" "$BACKUP.part"; then
     rm -f "$BACKUP.part"
@@ -74,4 +78,4 @@ fi
 
 echo "== 烧写自检固件"
 cd "$PROJECT"
-"$ROOT/bin/pio" run -t upload --upload-port "$PORT"
+"$PIO" run -t upload --upload-port "$PORT"
