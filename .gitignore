@@ -13,3 +13,6 @@ backups/
 # 编辑器与系统
 .DS_Store
 *.swp
+
+# 本地截图与工具产物
+.openchamber/
