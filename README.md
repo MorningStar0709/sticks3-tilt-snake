@@ -28,7 +28,7 @@ It has two modes, and the second one is the point of the project:
 | **B** (short) | Pause / resume | — |
 | **B** (hold) | Take control back from the AI | Start a new game in manual mode, after a 1.2 s recalibration |
 
-The top bar shows the current mode, the score, and the best score of the session.
+The top bar shows the current mode, the score, and the best score, which survives a reboot.
 
 ## How the AI plays
 
@@ -37,11 +37,11 @@ Each tick the AI runs through four checks, in this order:
 1. **BFS to the apple.** The body blocks the search, except the tail cell, which will have moved by the time the head gets there. The resulting path is drawn as blue dots.
 2. **Can it still reach its own tail after eating?** It simulates the first step, then asks whether the head can still reach the tail. If not, the move would seal the snake into a pocket, so it is rejected.
 3. **Starving.** After 40 ticks without food, step 2 is skipped and the AI takes the apple anyway. This is a deliberate gamble: better to risk a trap than to loop forever.
-4. **No path to the apple.** The AI heads for its own tail to untangle itself, and if even that fails, it picks the neighbouring cell with the largest reachable area, to survive as long as possible.
+4. **No path to the apple.** The AI heads for its own tail to untangle itself, and if even that fails, it picks the neighbouring cell with the largest reachable area, to take the least-bad move.
 
 In AI mode the board also shows the four cells next to the head that would trap it, so you can see the decision being made rather than just the result.
 
-Measured once during development: **41 apples, 44 segments, no deaths, in about 4 minutes** of continuous AI play on a 77-cell board. The serial log from that run was a temporary file and is not in this repository.
+Measured once during development: **41 apples, 44 segments, no deaths in a 4-minute window** of continuous AI play on a 77-cell board. "No deaths" means it happened not to die in that window, not that it cannot: when every move is bad, it still takes one of them. The serial log from that run was a temporary file and is not in this repository.
 
 ## Hardware
 
@@ -93,7 +93,8 @@ That FQBN comes from the event material and has **not** been re-verified against
 ## Repository layout
 
 ```text
-sticks3-play/     firmware, single source file on top of M5Unified
+sticks3-play/     firmware: game/ai.* is pure logic, main.cpp is the device layer
+tests/            host-side AI tests, built with plain g++
 docs/             hardware readings, runbook, retrospective (Chinese)
 docs/assets/      images used by the READMEs
 tools/            serial and flashing helpers
@@ -101,10 +102,9 @@ tools/            serial and flashing helpers
 
 ## Known limitations
 
-- **Best score is not persisted.** It lives in RAM and resets on every reboot. NVS storage is an obvious next step.
 - **The grid is compiled in.** 7 × 11 and an 18 px cell are constants in `main.cpp`; changing them changes the layout, not just the difficulty.
 - **Tilt wants a level surface.** The neutral position is sampled for 1.2 s at boot, and again when a manual game starts after a death. Move the board during that window and the controls will feel offset.
-- **No automated tests.** Everything is verified on the device and through the serial log. The AI logic is pure enough to extract into a host-side test harness, but that has not been done.
+- **The AI is tested off-device.** Its logic sits in `sticks3-play/src/game/ai.cpp` with no M5Stack dependency; `tests/test_ai.cpp` covers the pocket, tail-chase and starvation rules under plain g++. The display, IMU and input paths are still verified on the board.
 - **The supporting docs are Chinese-only.** The hardware baseline, runbook and retrospective were written for myself and are published as they are.
 
 ## Origin
