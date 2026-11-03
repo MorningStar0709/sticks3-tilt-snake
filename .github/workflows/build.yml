@@ -7,6 +7,9 @@ on:
 permissions:
   contents: read
 
+env:
+  PIO_VERSION: "6.2.0"
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -23,10 +26,10 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.platformio
-          key: pio-${{ runner.os }}-6.2.0-${{ hashFiles('sticks3-play/platformio.ini') }}
+          key: pio-${{ runner.os }}-${{ env.PIO_VERSION }}-${{ hashFiles('sticks3-play/platformio.ini') }}
           restore-keys: |
-            pio-${{ runner.os }}-
-      - run: pip install "platformio==6.2.0"
+            pio-${{ runner.os }}-${{ env.PIO_VERSION }}-
+      - run: pip install "platformio==${{ env.PIO_VERSION }}"
       - run: pio run -d sticks3-play
 
   host-tests:
