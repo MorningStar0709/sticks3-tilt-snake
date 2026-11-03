@@ -3,6 +3,7 @@
 //   - 倾斜设备控制方向：超过阈值才换向，且主轴需明显占优（抑制横跳）
 //   - 渲染走离屏 sprite，整块推屏，避免逐格重绘闪烁
 #include <M5Unified.h>
+#include <Preferences.h>
 #include <math.h>
 
 #include "game/ai.h"
@@ -52,6 +53,7 @@ Dir g_dir = kRight;
 bool g_alive = false;
 uint32_t g_score = 0;
 uint32_t g_best = 0;
+Preferences g_prefs;  // namespace "snake", key "best": manual and AI share one record
 int8_t g_foodX, g_foodY;
 uint32_t g_tickMs = kTickStartMs;
 uint32_t g_lastTick = 0;
@@ -274,7 +276,10 @@ void finish_game(const char* why) {
   Serial.printf("[snake] finish: %s score=%lu len=%d\n", why, (unsigned long)g_score, g_len);
   g_alive = false;
   M5.Speaker.tone(220, 350);
-  if (g_score > g_best) g_best = g_score;
+  if (g_score > g_best) {
+    g_best = g_score;
+    g_prefs.putULong("best", g_best);
+  }
   g_ghostLen = g_curLen;
   for (int i = 0; i < g_curLen; ++i) {
     g_ghostX[i] = g_curX[i];
@@ -433,6 +438,8 @@ void setup() {
   auto cfg = M5.config();
   M5.begin(cfg);
   Serial.begin(115200);
+  g_prefs.begin("snake", false);
+  g_best = g_prefs.getULong("best", 0);
   M5.Speaker.begin();
   M5.Speaker.setVolume(100);
   delay(300);
