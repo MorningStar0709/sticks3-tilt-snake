@@ -150,6 +150,8 @@ void test_one_cell_snake_has_exit() {
   set_body(s, {{3, 5}});
   CHECK(snake::has_exit(s));
   CHECK(snake::danger_mask(s) == 0);
+  set_body(s, {{0, 0}});  // corner: only the walls are unsafe
+  CHECK(snake::danger_mask(s) == ((1u << snake::kUp) | (1u << snake::kLeft)));
 }
 
 // Fallback metric: an unobstructed board is fully reachable.
