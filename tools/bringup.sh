@@ -12,12 +12,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT="$ROOT/sticks3-play"
 # 工具链与环境不在本仓内：PlatformIO core 用默认位置 ~/.platformio，
-# esptool 的解释器与包路径由 tools/esptool.sh 固定，pio 是全局命令。
+# esptool 的解释器与包路径由 tools/esptool.sh 固定。
+# pio 从 PATH 里找，uv / pipx / pip 装的都能用；需要指定时设 PIO=/path/to/pio。
 ESPTOOL="$ROOT/tools/esptool.sh"
-PIO="$HOME/.local/bin/pio"
+PIO="${PIO:-$(command -v pio || true)}"
 FLASH_SIZE=0x800000
 
-[ -x "$PIO" ] || { echo "找不到 pio: $PIO（先执行 uv tool install platformio）" >&2; exit 1; }
+[ -n "$PIO" ] && [ -x "$PIO" ] || { echo "找不到 pio。请先安装 PlatformIO Core（uv tool install platformio、pipx install platformio 或 pip install platformio 均可），或设置 PIO=/path/to/pio" >&2; exit 1; }
 
 PORT=/dev/ttyACM0
 BACKUP_ONLY=0

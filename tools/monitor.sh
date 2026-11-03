@@ -5,9 +5,8 @@
 # 用法: ./tools/monitor.sh [--reset] [秒数] [端口]
 set -euo pipefail
 
-# 解释器用 PlatformIO 自己的 venv（uv tool 安装），它带 pyserial。
-PY="$(uv tool dir 2>/dev/null || true)/platformio/bin/python"
-[ -x "$PY" ] || { echo "找不到 PlatformIO 解释器: $PY（先执行 uv tool install platformio）" >&2; exit 1; }
+# 读串口需要带 pyserial 的解释器，直接复用 tools/pio-python.sh 的查找逻辑。
+PY="$("$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/pio-python.sh")"
 
 DO_RESET=0
 if [ "${1:-}" = "--reset" ]; then DO_RESET=1; shift; fi
