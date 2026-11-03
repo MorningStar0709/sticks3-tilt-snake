@@ -1,6 +1,7 @@
 // Host-side tests for the hardware-free snake logic.
 // Build: g++ -std=c++17 -Istics3-play/src tests/test_ai.cpp sticks3-play/src/game/ai.cpp -o test_ai
 #include <cstdio>
+#include <cstring>
 #include <initializer_list>
 #include <utility>
 
@@ -126,7 +127,11 @@ void test_plan_path_reconstructs_route() {
   CHECK(n == 4);  // head (2,5) -> (3,5) -> (4,5) -> apple (5,5)
   CHECK(n > 0 && xs[0] == 2 && ys[0] == 5);
   CHECK(n > 0 && xs[n - 1] == 5 && ys[n - 1] == 5);
-  CHECK(snake::plan_path(s, xs, ys, 2) == 2);  // never writes past maxLen
+  int8_t cx[snake::kMaxBody], cy[snake::kMaxBody];
+  std::memset(cx, -1, sizeof(cx));
+  std::memset(cy, -1, sizeof(cy));
+  CHECK(snake::plan_path(s, cx, cy, 2) == 2);
+  CHECK(cx[2] == -1 && cy[2] == -1);  // clipped: nothing written past maxLen
 }
 
 // No apple: the overlay must clear the path instead of drawing a stale one.
