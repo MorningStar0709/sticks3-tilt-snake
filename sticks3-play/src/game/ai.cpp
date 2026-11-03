@@ -25,6 +25,8 @@ bool blocked_at(const State& s, int x, int y) {
 // Shared BFS. firstDir is always filled on success; xs/ys are optional.
 bool bfs(const State& s, int tx, int ty, Dir* firstDir, int8_t* xs, int8_t* ys, int* pathLen,
          int maxLen) {
+  if (tx < 0 || tx >= kCols || ty < 0 || ty >= kRows) return false;
+
   bool seen[kCells] = {};
   int8_t first[kCells] = {};
   int8_t parent[kCells];
@@ -111,20 +113,26 @@ bool sim_move(const State& in, Dir d, State* out) {
   }
   out->bx[0] = static_cast<int8_t>(nx);
   out->by[0] = static_cast<int8_t>(ny);
-  out->foodX = in.foodX;
-  out->foodY = in.foodY;
+  if (eat) {
+    out->foodX = -1;  // consumed; the next apple is outside this simulation
+    out->foodY = -1;
+    out->sinceEat = 0;
+  } else {
+    out->foodX = in.foodX;
+    out->foodY = in.foodY;
+    out->sinceEat = in.sinceEat;
+  }
   out->dir = d;
-  out->sinceEat = in.sinceEat;
   return true;
 }
 
 bool bfs_to(const State& s, int tx, int ty, Dir* firstDir) {
+  if (tx == s.bx[0] && ty == s.by[0]) return false;  // no first step exists
   return bfs(s, tx, ty, firstDir, nullptr, nullptr, nullptr, 0);
 }
 
 bool has_exit(const State& s) {
-  Dir tmp;
-  return bfs_to(s, s.bx[s.len - 1], s.by[s.len - 1], &tmp);
+  return bfs_to(s, s.bx[s.len - 1], s.by[s.len - 1], nullptr);
 }
 
 int reachable_area(const State& s) {
@@ -204,10 +212,9 @@ uint8_t danger_mask(const State& s) {
 }
 
 int plan_path(const State& s, int8_t* xs, int8_t* ys, int maxLen) {
-  if (s.foodX < 0) return 0;
-  Dir d;
+  if (s.foodX < 0 || s.foodY < 0) return 0;
   int n = 0;
-  if (!bfs(s, s.foodX, s.foodY, &d, xs, ys, &n, maxLen)) return 0;
+  if (!bfs(s, s.foodX, s.foodY, nullptr, xs, ys, &n, maxLen)) return 0;
   return n;
 }
 

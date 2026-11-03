@@ -1,5 +1,5 @@
 // Host-side tests for the hardware-free snake logic.
-// Build: g++ -std=c++17 -Istics3-play/src tests/test_ai.cpp sticks3-play/src/game/ai.cpp -o test_ai
+// Build: g++ -std=c++17 -I sticks3-play/src tests/test_ai.cpp sticks3-play/src/game/ai.cpp -o test_ai
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
@@ -96,7 +96,6 @@ void test_ai_reaches_reachable_apple() {
     const snake::Dir d = snake::ai_dir(s);
     snake::State next{};
     if (!snake::sim_move(s, d, &next)) break;
-    next.dir = d;
     ++steps;
     if (next.bx[0] == s.foodX && next.by[0] == s.foodY) {
       ate = true;
@@ -115,6 +114,7 @@ void test_danger_mask_flags_sealing_directions() {
   const uint8_t mask = snake::danger_mask(s);
   CHECK((mask & (1u << snake::kDown)) != 0);
   CHECK((mask & (1u << snake::kUp)) == 0);
+  CHECK((mask & (1u << snake::kLeft)) != 0);  // wall: illegal counts as unsafe
 }
 
 // The overlay draws plan_path()'s points; they must start at the head, end on
@@ -148,6 +148,95 @@ void test_reachable_area_counts_open_board() {
   CHECK(snake::reachable_area(s) == snake::kCols * snake::kRows);
 }
 
+
+// Eating consumes the apple and resets hunger, so a re-used successor is faithful.
+void test_sim_move_after_eat_clears_food() {
+  snake::State s = make_state(3, 5, snake::kRight, 7);
+  set_body(s, {{2, 5}, {1, 5}});
+  snake::State out{};
+  CHECK(snake::sim_move(s, snake::kRight, &out));
+  CHECK(out.len == 3);
+  CHECK(out.foodX == -1 && out.foodY == -1);
+  CHECK(out.sinceEat == 0);
+}
+
+// The head is not a target: no first step exists, and off-board targets must not
+// index the BFS arrays.
+void test_bfs_to_rejects_head_and_off_board() {
+  snake::State s = make_state(-1, -1, snake::kUp, 0);
+  set_body(s, {{0, 0}});
+  snake::Dir d;
+  CHECK(!snake::bfs_to(s, 0, 0, &d));
+  CHECK(!snake::bfs_to(s, -1, 0, &d));
+  CHECK(!snake::bfs_to(s, snake::kCols, 0, &d));
+}
+
+// A body wall must shrink the reachable area; the one-cell case above can never
+// catch a broken block test because the only body cell is the skipped tail.
+void test_reachable_area_respects_body() {
+  snake::State s = make_state(-1, -1, snake::kUp, 0);
+  set_body(s, {{3, 5}, {3, 4}, {3, 3}, {3, 2}, {3, 1}, {3, 0}});
+  CHECK(snake::reachable_area(s) == snake::kCols * snake::kRows - 4);
+}
+
+// The body forces a detour: the plan is longer than the straight line and never
+// steps on a blocked cell.
+void test_plan_path_detours_around_body() {
+  snake::State s = make_state(3, 10, snake::kDown, 0);
+  set_body(s, {{3, 5}, {3, 6}, {3, 7}, {3, 8}, {3, 9}});
+  int8_t xs[snake::kMaxBody], ys[snake::kMaxBody];
+  const int n = snake::plan_path(s, xs, ys, snake::kMaxBody);
+  CHECK(n == 8);  // head to (3,10) around the wall: 7 steps
+  for (int i = 0; i < n; ++i) {
+    for (int b = 1; b < s.len - 1; ++b) {
+      CHECK(!(xs[i] == s.bx[b] && ys[i] == s.by[b]));
+    }
+  }
+}
+
+// Whatever the state, a legal move exists only if the AI picks one. This covers
+// the reachable-area fallback, which no hand-built case reaches cheaply.
+void test_ai_never_picks_an_illegal_move() {
+  snake::State s = make_state(0, 10, snake::kRight, 0);
+  set_body(s, {{3, 5}, {3, 6}, {3, 7}});
+  uint32_t rng = 12345;
+  for (int step = 0; step < 400; ++step) {
+    int legal = 0;
+    for (int d = 0; d < 4; ++d) {
+      snake::State t;
+      if (snake::sim_move(s, static_cast<snake::Dir>(d), &t)) ++legal;
+    }
+    const snake::Dir chosen = snake::ai_dir(s);
+    snake::State next{};
+    const bool moved = snake::sim_move(s, chosen, &next);
+    if (legal > 0) CHECK(moved);
+    if (!moved) break;
+
+    rng = rng * 1664525u + 1013904223u;
+    int k = 0;
+    for (int d = 0; d < 4; ++d) {
+      snake::State t;
+      if (!snake::sim_move(s, static_cast<snake::Dir>(d), &t)) continue;
+      if (k == static_cast<int>(rng % 4)) { next = t; break; }
+      ++k;
+    }
+    s = next;
+    if (s.foodX < 0) {
+      for (int k2 = 0; k2 < snake::kMaxBody; ++k2) {
+        const int idx = (static_cast<int>(rng) + k2) % (snake::kCols * snake::kRows);
+        const int x = idx % snake::kCols, y = idx / snake::kCols;
+        bool body = false;
+        for (int i = 0; i < s.len; ++i) {
+          if (s.bx[i] == x && s.by[i] == y) body = true;
+        }
+        if (!body) { s.foodX = x; s.foodY = y; break; }
+      }
+    } else {
+      ++s.sinceEat;
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -162,6 +251,11 @@ int main() {
   test_plan_path_reconstructs_route();
   test_plan_path_empty_without_food();
   test_reachable_area_counts_open_board();
+  test_sim_move_after_eat_clears_food();
+  test_bfs_to_rejects_head_and_off_board();
+  test_reachable_area_respects_body();
+  test_plan_path_detours_around_body();
+  test_ai_never_picks_an_illegal_move();
 
   if (failures != 0) {
     std::printf("%d check(s) failed\n", failures);

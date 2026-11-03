@@ -53,6 +53,7 @@ Dir g_dir = kRight;
 bool g_alive = false;
 uint32_t g_score = 0;
 uint32_t g_best = 0;
+bool g_nvsOk = false;
 Preferences g_prefs;  // namespace "snake", key "best": manual and AI share one record
 int8_t g_foodX, g_foodY;
 uint32_t g_tickMs = kTickStartMs;
@@ -278,7 +279,9 @@ void finish_game(const char* why) {
   M5.Speaker.tone(220, 350);
   if (g_score > g_best) {
     g_best = g_score;
-    if (g_prefs.putULong("best", g_best) == 0) Serial.println("[snake] NVS write failed");
+    if (g_nvsOk && g_prefs.putULong("best", g_best) == 0) {
+      Serial.println("[snake] NVS write failed");
+    }
   }
   g_ghostLen = g_curLen;
   for (int i = 0; i < g_curLen; ++i) {
@@ -438,8 +441,12 @@ void setup() {
   auto cfg = M5.config();
   M5.begin(cfg);
   Serial.begin(115200);
-  if (!g_prefs.begin("snake", false)) Serial.println("[snake] NVS open failed");
-  g_best = g_prefs.getULong("best", 0);
+  g_nvsOk = g_prefs.begin("snake", false);
+  if (!g_nvsOk) {
+    Serial.println("[snake] NVS open failed - BEST will not persist");
+  } else {
+    g_best = g_prefs.getULong("best", 0);
+  }
   M5.Speaker.begin();
   M5.Speaker.setVolume(100);
   delay(300);
