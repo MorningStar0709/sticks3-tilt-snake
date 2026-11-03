@@ -278,7 +278,7 @@ void finish_game(const char* why) {
   M5.Speaker.tone(220, 350);
   if (g_score > g_best) {
     g_best = g_score;
-    g_prefs.putULong("best", g_best);
+    if (g_prefs.putULong("best", g_best) == 0) Serial.println("[snake] NVS write failed");
   }
   g_ghostLen = g_curLen;
   for (int i = 0; i < g_curLen; ++i) {
@@ -438,7 +438,7 @@ void setup() {
   auto cfg = M5.config();
   M5.begin(cfg);
   Serial.begin(115200);
-  g_prefs.begin("snake", false);
+  if (!g_prefs.begin("snake", false)) Serial.println("[snake] NVS open failed");
   g_best = g_prefs.getULong("best", 0);
   M5.Speaker.begin();
   M5.Speaker.setVolume(100);

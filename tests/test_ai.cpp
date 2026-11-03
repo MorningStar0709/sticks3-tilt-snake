@@ -116,6 +116,33 @@ void test_danger_mask_flags_sealing_directions() {
   CHECK((mask & (1u << snake::kUp)) == 0);
 }
 
+// The overlay draws plan_path()'s points; they must start at the head, end on
+// the apple, and honour the caller's buffer bound.
+void test_plan_path_reconstructs_route() {
+  snake::State s = make_state(5, 5, snake::kRight, 0);
+  set_body(s, {{2, 5}, {1, 5}});
+  int8_t xs[snake::kMaxBody], ys[snake::kMaxBody];
+  const int n = snake::plan_path(s, xs, ys, snake::kMaxBody);
+  CHECK(n == 4);  // head (2,5) -> (3,5) -> (4,5) -> apple (5,5)
+  CHECK(n > 0 && xs[0] == 2 && ys[0] == 5);
+  CHECK(n > 0 && xs[n - 1] == 5 && ys[n - 1] == 5);
+  CHECK(snake::plan_path(s, xs, ys, 2) == 2);  // never writes past maxLen
+}
+
+// No apple: the overlay must clear the path instead of drawing a stale one.
+void test_plan_path_empty_without_food() {
+  snake::State s = make_state(-1, -1, snake::kRight, 0);
+  int8_t xs[snake::kMaxBody], ys[snake::kMaxBody];
+  CHECK(snake::plan_path(s, xs, ys, snake::kMaxBody) == 0);
+}
+
+// Fallback metric: an unobstructed board is fully reachable.
+void test_reachable_area_counts_open_board() {
+  snake::State s = make_state(3, 5, snake::kRight, 0);
+  set_body(s, {{3, 5}});
+  CHECK(snake::reachable_area(s) == snake::kCols * snake::kRows);
+}
+
 }  // namespace
 
 int main() {
@@ -127,6 +154,9 @@ int main() {
   test_ai_gambles_at_41_ticks();
   test_ai_reaches_reachable_apple();
   test_danger_mask_flags_sealing_directions();
+  test_plan_path_reconstructs_route();
+  test_plan_path_empty_without_food();
+  test_reachable_area_counts_open_board();
 
   if (failures != 0) {
     std::printf("%d check(s) failed\n", failures);

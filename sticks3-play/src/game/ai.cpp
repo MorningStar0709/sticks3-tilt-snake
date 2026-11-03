@@ -5,6 +5,7 @@ namespace snake {
 namespace {
 
 constexpr int kCells = kCols * kRows;
+static_assert(kCells <= 127, "BFS parents are stored as int8_t cell indices");
 constexpr int kDx[4] = {0, 0, -1, 1};
 constexpr int kDy[4] = {-1, 1, 0, 0};
 constexpr Dir kDirs[4] = {kUp, kDown, kLeft, kRight};

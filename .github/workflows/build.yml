@@ -4,9 +4,17 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   firmware:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -16,14 +24,15 @@ jobs:
         with:
           path: ~/.platformio
           key: pio-${{ runner.os }}-${{ hashFiles('sticks3-play/platformio.ini') }}
-      - run: pip install platformio
+          restore-keys: |
+            pio-${{ runner.os }}-
+      - run: pip install "platformio==6.2.0"
       - run: pio run -d sticks3-play
 
   host-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      # Keep -I as a separate argument: some GCC versions swallow the first
-      # character of a joined -Ipath that starts with "s".
       - run: g++ -std=c++17 -Wall -Wextra -I sticks3-play/src tests/test_ai.cpp sticks3-play/src/game/ai.cpp -o test_ai
       - run: ./test_ai
