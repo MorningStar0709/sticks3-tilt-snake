@@ -139,6 +139,17 @@ void test_plan_path_empty_without_food() {
   snake::State s = make_state(-1, -1, snake::kRight, 0);
   int8_t xs[snake::kMaxBody], ys[snake::kMaxBody];
   CHECK(snake::plan_path(s, xs, ys, snake::kMaxBody) == 0);
+  s.foodX = 3;  // x set but y missing: also refuses instead of indexing
+  CHECK(snake::plan_path(s, xs, ys, snake::kMaxBody) == 0);
+}
+
+// A one-cell snake is not trapped: head and tail are the same cell, so every
+// legal move keeps an exit and an open board has no danger bits.
+void test_one_cell_snake_has_exit() {
+  snake::State s = make_state(-1, -1, snake::kRight, 0);
+  set_body(s, {{3, 5}});
+  CHECK(snake::has_exit(s));
+  CHECK(snake::danger_mask(s) == 0);
 }
 
 // Fallback metric: an unobstructed board is fully reachable.
@@ -169,6 +180,8 @@ void test_bfs_to_rejects_head_and_off_board() {
   CHECK(!snake::bfs_to(s, 0, 0, &d));
   CHECK(!snake::bfs_to(s, -1, 0, &d));
   CHECK(!snake::bfs_to(s, snake::kCols, 0, &d));
+  CHECK(!snake::bfs_to(s, 0, -1, &d));
+  CHECK(!snake::bfs_to(s, 0, snake::kRows, &d));
 }
 
 // A body wall must shrink the reachable area; the one-cell case above can never
@@ -223,7 +236,8 @@ void test_ai_never_picks_an_illegal_move() {
     s = next;
     if (s.foodX < 0) {
       for (int k2 = 0; k2 < snake::kMaxBody; ++k2) {
-        const int idx = (static_cast<int>(rng) + k2) % (snake::kCols * snake::kRows);
+        constexpr uint32_t kCells = static_cast<uint32_t>(snake::kCols * snake::kRows);
+        const int idx = static_cast<int>((rng % kCells + static_cast<uint32_t>(k2)) % kCells);
         const int x = idx % snake::kCols, y = idx / snake::kCols;
         bool body = false;
         for (int i = 0; i < s.len; ++i) {
@@ -256,6 +270,7 @@ int main() {
   test_reachable_area_respects_body();
   test_plan_path_detours_around_body();
   test_ai_never_picks_an_illegal_move();
+  test_one_cell_snake_has_exit();
 
   if (failures != 0) {
     std::printf("%d check(s) failed\n", failures);

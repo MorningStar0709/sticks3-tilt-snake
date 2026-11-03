@@ -132,6 +132,7 @@ bool bfs_to(const State& s, int tx, int ty, Dir* firstDir) {
 }
 
 bool has_exit(const State& s) {
+  if (s.len <= 1) return true;  // head is the tail: there is nothing to trap
   return bfs_to(s, s.bx[s.len - 1], s.by[s.len - 1], nullptr);
 }
 
