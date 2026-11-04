@@ -43,6 +43,8 @@ In AI mode the board also shows the four cells next to the head that would trap 
 
 Measured once during development: **41 apples, 44 segments, no deaths in a 4-minute window** of continuous AI play on a 77-cell board. "No deaths" means it happened not to die in that window, not that it cannot: when every move is bad, it still takes one of them. The serial log from that run was a temporary file and is not in this repository.
 
+A second run on the board, after the AI logic moved into `game/ai.cpp` (v0.1.1): **40 apples, 43 segments**. It went 69 ticks without food before taking the starvation gamble, won one more apple, and died by self-collision. That is the designed outcome, not a regression: the gamble trades safety for a single apple. On the same unit, a best score of 52 survived a power cycle.
+
 ## Hardware
 
 | | |
