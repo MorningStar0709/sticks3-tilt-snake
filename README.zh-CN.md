@@ -62,8 +62,6 @@ AI 逻辑抽进 `game/ai.cpp` 后又实测一局（v0.1.1）：**40 个苹果、
 - **拔掉 USB 不等于断电。** 板上有电池。要重启，双击侧边电源键关机，再单击开机。
 - **烧写失败后，芯片可能停在 ROM bootloader 里。** 软件复位救不回来，同样走双击关机、单击开机。
 
-实测读数（I2C 地址、麦克风与扬声器电平、引脚核对）在 [`docs/hardware-baseline.md`](docs/hardware-baseline.md)，日常操作在 [`docs/sticks3-runbook.md`](docs/sticks3-runbook.md)。
-
 ## 编译与烧写
 
 需要 [PlatformIO Core](https://docs.platformio.org/en/latest/core/installation/)（`pio`）和一根能传数据的 USB-C 线。
@@ -97,7 +95,6 @@ esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,FlashSize=8M,PartitionScheme=def
 ```text
 sticks3-play/     固件：game/ai.* 是纯逻辑，main.cpp 是设备层
 tests/            AI 的 host 测试，用系统 g++ 编译
-docs/             硬件实测、操作手册、阶段回顾
 docs/assets/      README 用到的图片
 tools/            串口与烧写辅助脚本
 ```
@@ -107,7 +104,6 @@ tools/            串口与烧写辅助脚本
 - **棋盘是编译期常量。** 7 × 11 和 18 px 的格子写在 `main.cpp` 里，改它们等于改布局，不只是改难度。
 - **倾斜需要相对水平的面。** 开机时采样 1.2 秒确定中位，死亡后开始手动局时会再采一次。这 1.2 秒里挪动板子，方向就会偏。
 - **AI 有 host 测试。** 决策逻辑在 `sticks3-play/src/game/ai.cpp`，不依赖 M5Stack；`tests/test_ai.cpp` 用普通 g++ 覆盖封死口袋、追尾、饥饿兜底三条规则。屏幕、IMU 和按键仍然靠上板验证。
-- **配套文档只有中文。** 硬件实测、操作手册和阶段回顾是写给自己看的，按原样公开。
 
 ## 来历
 

@@ -62,8 +62,6 @@ Two details that cost time and are worth knowing before you flash anything:
 - **Unplugging USB does not power the board off.** There is a battery. To reboot, double-click the side power key to shut down, then single-click to start.
 - **The board can sit in the ROM bootloader after a failed flash.** Software reset will not get it out. The same double-click / single-click sequence will.
 
-The full set of measured readings (I2C addresses, microphone and speaker levels, pin checks) is in [`docs/hardware-baseline.md`](docs/hardware-baseline.md), and everyday operation is in [`docs/sticks3-runbook.md`](docs/sticks3-runbook.md). Both are in Chinese.
-
 ## Build and flash
 
 You need [PlatformIO Core](https://docs.platformio.org/en/latest/core/installation/) (`pio`) and a USB-C data cable.
@@ -97,7 +95,6 @@ That FQBN comes from the event material and has **not** been re-verified against
 ```text
 sticks3-play/     firmware: game/ai.* is pure logic, main.cpp is the device layer
 tests/            host-side AI tests, built with plain g++
-docs/             hardware readings, runbook, retrospective (Chinese)
 docs/assets/      images used by the READMEs
 tools/            serial and flashing helpers
 ```
@@ -107,7 +104,6 @@ tools/            serial and flashing helpers
 - **The grid is compiled in.** 7 × 11 and an 18 px cell are constants in `main.cpp`; changing them changes the layout, not just the difficulty.
 - **Tilt wants a level surface.** The neutral position is sampled for 1.2 s at boot, and again when a manual game starts after a death. Move the board during that window and the controls will feel offset.
 - **The AI is tested off-device.** Its logic sits in `sticks3-play/src/game/ai.cpp` with no M5Stack dependency; `tests/test_ai.cpp` covers the pocket, tail-chase and starvation rules under plain g++. The display, IMU and input paths are still verified on the board.
-- **The supporting docs are Chinese-only.** The hardware baseline, runbook and retrospective were written for myself and are published as they are.
 
 ## Origin
 
